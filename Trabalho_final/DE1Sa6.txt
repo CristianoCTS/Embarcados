@@ -9,9 +9,16 @@
 #include <sys/ioctl.h>
 #include <time.h>
 
+// =============================================================
+//                CONFIGURAÇÃO DOS BOTÕES
+// =============================================================
 #define BTN_LEFT_MASK 0x08 
 
+// Botão MAIS A DIREITA (KEY0) -> Mudar Dificuldade / Pausar
 #define BTN_RIGHT_MASK 0x01 
+// =============================================================
+
+// DEFINIÇÕES DE HARDWARE
 #define VGA_BASE_PHYS 0xC8000000
 #define VGA_SPAN      0x00080000
 #define SCREEN_W 320
@@ -317,7 +324,7 @@ int main() {
                     break; // Sai do loop e começa o jogo
                 }
                 
-                // SE QUALQUER OUTRO BOTÃO FOR APERTADO (Direita ou qualquer outro)
+                // SE QUALQUER OUTRO BOTÃO FOR APERTADO 
                 else {
                     current_level++;
                     if (current_level > 3) current_level = 0;
@@ -402,6 +409,7 @@ int main() {
             }
             
             cleanup(&score, &current_speed, &diff);
+
             if (check_player_collision((int)p_y, (int)p_x)) {
                 printf("Game Over! Score: %d\n", score);
 
