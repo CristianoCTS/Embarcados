@@ -827,7 +827,6 @@ int main() {
     int current_level = 0; 
 
     while(1) {
-        printf("Tela inicial. Nivel Atual: %d\n", current_level + 1);
         update_score_display(0);
         
         draw_background_pattern();
@@ -856,7 +855,7 @@ int main() {
         draw_sprite_with_transparent(y_start - 40, SCREEN_W/2, BALL_H, BALL_W, (uint16_t*)levels[current_level].ball_sprite);
 	
 
-        int vs_scale = 2; 
+        int vs_scale = 2;
         int vs_x = (SCREEN_W / 2) -30; //GHJKL
         int vs_y = (y_start - 40) - (VS_H * vs_scale / 2);
         
@@ -897,7 +896,6 @@ int main() {
                     
                     draw_sprite_with_transparent(y_start - 40, SCREEN_W/2, BALL_H, BALL_W, (uint16_t*)levels[current_level].ball_sprite);
                     
-                    printf(">> Dificuldade: %d\n", current_level + 1);
                     fflush(stdout);
 
                     while ((*keys_ptr != 0) && !(*keys_ptr & BTN_LEFT_MASK)) usleep(10000);
@@ -924,7 +922,6 @@ int main() {
         ecount = 0;
         for(int i=0; i<MAX_ACTIVE; i++) enemies[i].active = 0;
 
-        printf("Jogo iniciado! Dif: %d\n", current_level+1);
         fflush(stdout);
         
 
@@ -973,7 +970,6 @@ int main() {
             cleanup(&score, &current_speed, &diff);
 
             if (check_player_collision((int)p_y, (int)p_x)) {
-                printf("Game Over! Score: %d\n", score);
                 draw_game_over_x();
                 while (*keys_ptr != 0) usleep(10000);
                 while (!(*keys_ptr & BTN_LEFT_MASK)) {
