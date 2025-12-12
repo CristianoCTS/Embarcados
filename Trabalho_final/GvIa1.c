@@ -7,29 +7,23 @@
 
 volatile uint16_t *ppix = (uint16_t *)VGA_BASE;
 
-/*Lines*/
 #define GREEN_D 0x03E0
 #define GREEN_L 0x07C0
 #define STRIPE_H 16
 
-/*enemys*/
 #define SQ_W 11
 #define SQ_H 25
 
-/*Dificulty*/
 #define SCROLL_SPEED 1
 #define MIN_SQ 1
 #define MAX_SQ 3
 #define MIN_GAP 60
 #define MAX_GAP 70
 
-/*RNG*/
 static unsigned int rng_state = 1;
 unsigned int rand32() { rng_state = rng_state * 1103515245 + 12345; return (rng_state>>16)&0x7FFF; }
 int rand_range(int a,int b){ return a + (rand32()%(b-a+1)); }
 
-
-/*Sprites*/
 uint16_t enemy1_colors[][11] = {
     {0,0,0,0x0000,0x0000,0x0000,0x0000,0x0000,0,0,0},
     {0,0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0,0},
@@ -91,7 +85,7 @@ uint16_t enemy2_colors[][11] = {
 typedef struct {
     int y;
     int x;
-    int type; /* 1 ou 2 */
+    int type;
 } Enemy;
 
 #define MAX_ACTIVE 200
@@ -137,8 +131,6 @@ void delay(){
     for(i=0;i<6000;i++);
 }
 
-/*colision*/
-
 int conflict(int y, int x)
 {
     for(int i=0;i<ecount;i++){
@@ -167,7 +159,6 @@ int main()
     int y;
     int next_spawn = rand_range(MIN_GAP,MAX_GAP);
 
-    /*camp*/
     for(y=0;y<VGA_ROWS;y++){
         uint16_t color = ((y/STRIPE_H)&1) ? GREEN_D : GREEN_L;
         draw_row_color(y,color);
@@ -178,7 +169,6 @@ int main()
 
     while(1){
 
-        /*scroll*/
         for(int s=0;s<SCROLL_SPEED;s++){
             for(y=VGA_ROWS-1;y>0;y--)
                 copy_row(y,y-1);
