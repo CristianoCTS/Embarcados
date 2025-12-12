@@ -1,44 +1,88 @@
-//DE1 Soccer
-// Cristiano Tolentino Santos - 211028050
-// Graziela da Silva Machado - 211028168
-// No jogo se deve desviar de inimigos controlando o player por meio do acelerometro
-// As dificuldades são corinthian<palmeiras<Flamengo<Inter
-// O jogo inicia e retorna para o menu principal no pushbutton mais da esuqerda e muda a dificuldade no menu principal e pausa o jogo no pushbutton mais da direita
-// As vezes é necessário segurar os pushbuttons um pouco para que sejam lidos
+/*
+ * ======================================================================================
+ * JOGO EMBARCADO: SOCCER EVASION (DE1-SoC FPGA)
+ * ======================================================================================
+ *
+ * DESCRIÇÃO:
+ * Este programa implementa um jogo de desvio de obstáculos para a placa DE1-SoC,
+ * utilizando o processador ARM Cortex-A9 rodando Linux. O jogo interage diretamente
+ * com o hardware mapeado em memória do FPGA para controle de vídeo (VGA), leitura
+ * de botões (Push Buttons), exibição em displays de 7 segmentos e leitura do
+ * acelerômetro via barramento I2C.
+ *
+ * OBJETIVO DO JOGO:
+ * Controlar um jogador (sprite) movendo-o lateralmente para desviar de inimigos que descem pela tela.
+ * A pontuação aumenta conforme o tempo e a dificuldade escolhida.
+ *
+ * FUNCIONALIDADES:
+ * - Menu inicial animado com seleção de dificuldade (Times de futebol).
+ * - Renderização gráfica direta no buffer de vídeo VGA (320x240 pixels).
+ * - Sprites coloridos com transparência para jogador e inimigos.
+ * - Física básica de movimento e colisão (AABB - Axis-Aligned Bounding Box).
+ * - Sistema de pontuação exibido nos displays de 7 segmentos.
+ * - Controle via Acelerômetro ADXL345.
+ * - Botões físicos para controle de fluxo (Start, Pause, Seleção de dificuldade).
+ *
+ * ======================================================================================
+ */
 
-// Evitar alguns warnings
+// Define necessário para evitar warnings com usleep e outras funções POSIX
 #define _DEFAULT_SOURCE
 
-//bibliotecas
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <stdint.h>
-#include <linux/i2c-dev.h>
-#include <sys/ioctl.h>
-#include <time.h>
-#include <math.h>
-#include <stdbool.h>
+// --- INCLUSÃO DE BIBLIOTECAS ---
+#include <stdio.h>      // Entrada e saída padrão (printf)
+#include <stdlib.h>     // Funções gerais (abs, rand)
+#include <unistd.h>     // Chamadas de sistema UNIX (open, close, usleep, write, read)
+#include <fcntl.h>      // Controle de arquivos (O_RDWR, O_SYNC)
+#include <sys/mman.h>   // Mapeamento de memória (mmap, munmap)
+#include <stdint.h>     // Tipos inteiros de tamanho fixo (uint16_t, uint32_t)
+#include <linux/i2c-dev.h> // Interface com dispositivo I2C no Linux
+#include <sys/ioctl.h>  // Controle de I/O (para configurar escravo I2C)
+#include <time.h>       // Manipulação de tempo (time) para semente do RNG
+#include <math.h>       // Funções matemáticas (se necessário, ex: cálculos de física)
+#include <stdbool.h>    // Tipo booleano (bool, true, false)
 
-//mapeamento dos botoes e memórias
-#define BTN_LEFT_MASK 0x08
-#define BTN_RIGHT_MASK 0x01
+// =============================================================
+//                CONFIGURAÇÃO DOS BOTÕES (INPUT)
+// =============================================================
+// Máscaras de bits para identificar qual botão foi pressionado no registrador de chaves.
+// A DE1-SoC mapeia os botões KEY3..KEY0 em um registrador de 32 bits.
+#define BTN_LEFT_MASK 0x08   // Botão Esquerdo (KEY3) - Usado para START / SAIR DO PAUSE
+#define BTN_RIGHT_MASK 0x01  // Botão Direito (KEY0) - Usado para MUDAR DIFICULDADE / PAUSE
+
+// =============================================================
+//                CONFIGURAÇÃO DE HARDWARE E MEMÓRIA
+// =============================================================
+
+// --- ENDEREÇOS FÍSICOS DO FPGA ---
+// Estes endereços são específicos do hardware da DE1-SoC e como o Qsys/Platform Designer foi configurado.
+
+// Endereço base físico do buffer de pixels VGA (Backbuffer ou Frontbuffer dependendo da config)
 #define VGA_BASE_PHYS 0xC8000000
+// Tamanho da região de memória VGA a ser mapeada (512KB é suficiente para 320x240x16bpp)
 #define VGA_SPAN      0x00080000
-//configuracao da tela
+
+// Dimensões da tela VGA configurada no IP Core
 #define SCREEN_W 320
 #define SCREEN_H 240
+// Stride: Largura da linha em memória. O hardware VGA muitas vezes alinha linhas a potências de 2 (512 ou 1024 bytes).
+// Aqui, 512 pixels * 2 bytes/pixel = 1024 bytes de stride real, mas o índice é por pixel (uint16_t).
 #define VGA_STRIDE_PIXELS 512 
-//offsets e bases 
-#define HW_REGS_BASE 0xFF200000
-#define HW_REGS_SPAN 0x00200000
-#define KEYS_OFFSET      0x00000050
-#define HEX3_HEX0_OFFSET 0x00000020
-#define HEX5_HEX4_OFFSET 0x00000030
 
-//cores
+// Endereço base da ponte Lightweight HPS-to-FPGA (LWH2F) para acesso a registradores de periféricos
+#define HW_REGS_BASE 0xFF200000
+// Tamanho do span da ponte LWH2F (2MB)
+#define HW_REGS_SPAN 0x00200000
+
+// Offsets dos periféricos relativos à base da ponte LWH2F
+#define KEYS_OFFSET      0x00000050  // Offset para leitura dos Push Buttons
+#define HEX3_HEX0_OFFSET 0x00000020  // Offset para Displays de 7 segmentos HEX0-3
+#define HEX5_HEX4_OFFSET 0x00000030  // Offset para Displays de 7 segmentos HEX4-5
+
+// =============================================================
+//                     DEFINIÇÕES DE CORES (RGB 565)
+// =============================================================
+// O formato de cor é 16 bits: 5 bits Vermelho, 6 bits Verde, 5 bits Azul.
 #define BLUE     0x001F
 #define GREEN_D  0x03E0
 #define GREEN_L  0x07C0
@@ -47,32 +91,44 @@
 #define RED      0xF800
 #define YELLOW   0xFFE0
 #define WHITE    0xFFFF
+#define GREEN_L2 0x04A0 
 #define SKIN     0xFDB7
 #define HAIR     0x8A20
 #define GREY     0x7BEF 
 
-//Resquicios de ter adaptado o TrabalhoVGA do CPUlator para aproveitar funcoes para o jogo
+// Definições de compatibilidade para facilitar o uso no código do menu e jogo
 #define WIDTH           SCREEN_W
 #define HEIGHT          SCREEN_H
 #define PIXELS_PER_ROW  VGA_STRIDE_PIXELS
 
-//ponteiros
-volatile uint16_t *vga_ptr = NULL;
-volatile uint32_t *keys_ptr = NULL;
-volatile uint32_t *hex3_hex0_ptr = NULL;
-volatile uint32_t *hex5_hex4_ptr = NULL;
-int fd_i2c;
-//Display de 7 seg
+// --- PONTEIROS GLOBAIS PARA ACESSO AO HARDWARE ---
+// 'volatile' indica ao compilador para não otimizar leituras/escritas, pois os valores podem mudar externamente (pelo hardware).
+volatile uint16_t *vga_ptr = NULL;        // Ponteiro para memória de vídeo
+volatile uint32_t *keys_ptr = NULL;       // Ponteiro para botões
+volatile uint32_t *hex3_hex0_ptr = NULL;  // Ponteiro para HEX 0-3
+volatile uint32_t *hex5_hex4_ptr = NULL;  // Ponteiro para HEX 4-5
+int fd_i2c; // Descritor de arquivo para o I2C (Acelerômetro)
+
+// Tabela de decodificação para display de 7 segmentos (0-9)
+// Padrão de bits: gfedcba (0 = desligado, 1 = ligado) - Lógica positiva ou negativa depende do hardware.
 const uint8_t seg7_table[] = {0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F};
 
-//Tamanho dos jogadores
-#define STRIPE_H 16
-#define SQ_W 11
-#define SQ_H 25
-#define PLAYER_W 11
-#define PLAYER_H 26
+// =============================================================
+//                     CONSTANTES DE JOGABILIDADE
+// =============================================================
+#define STRIPE_H 16      // Altura das listras do gramado (efeito visual de movimento)
+#define SQ_W 11          // Largura base do inimigo (quadrado/sprite)
+#define SQ_H 25          // Altura base do inimigo
+#define PLAYER_W 11      // Largura do jogador
+#define PLAYER_H 26      // Altura do jogador
 
-//sprites
+// =============================================================
+//                          SPRITES (DADOS)
+// =============================================================
+// Arrays contendo os mapas de cores (bitmaps) para os objetos do jogo.
+// '0' geralmente representa transparência na lógica de desenho.
+
+// Sprite do Jogador principal
 uint16_t jogador1_colors[][11] = {
     {0, 0, 0, 0x0820, 0x0820, 0x0820, 0x0820, 0x0820, 0, 0, 0}, 
     {0, 0, 0x0820, 0x0820, 0x0820, 0x0820, 0x0820, 0x0820, 0x0820, 0, 0}, 
@@ -102,6 +158,9 @@ uint16_t jogador1_colors[][11] = {
     {0, 0, 0x0820, 0x0820, 0x0820, 0, 0, 0, 0, 0, 0},
 };
 
+// Sprites do Menu (Monocromáticos - 1 bit por pixel)
+
+//DE1
 #define H_DE1 12
 #define W_DE1 34
 static const uint8_t bmp_de1[H_DE1][W_DE1] = {
@@ -119,6 +178,7 @@ static const uint8_t bmp_de1[H_DE1][W_DE1] = {
     {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0}
 };
 
+//soccer
 #define H_SOC 10
 #define W_SOC 47
 static const uint8_t bmp_soccer[H_SOC][W_SOC] = {
@@ -134,6 +194,7 @@ static const uint8_t bmp_soccer[H_SOC][W_SOC] = {
     {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
 };
 
+//start
 #define H_START 8
 #define W_START 31
 static const uint8_t bmp_start[H_START][W_START] = {
@@ -147,6 +208,7 @@ static const uint8_t bmp_start[H_START][W_START] = {
     {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
 };
 
+//Bolas para o menu
 #define BALL_SZ 12
 static const uint8_t sprite_ball[BALL_SZ][BALL_SZ] = {
     {0,0,0,0,1,1,1,1,0,0,0,0},
@@ -163,6 +225,7 @@ static const uint8_t sprite_ball[BALL_SZ][BALL_SZ] = {
     {0,0,0,0,1,1,1,1,0,0,0,0}
 };
 
+//jogador do menu
 #define PLR_W 14
 #define PLR_H 21
 static const uint8_t sprite_player[PLR_H][PLR_W] = {
@@ -189,6 +252,7 @@ static const uint8_t sprite_player[PLR_H][PLR_W] = {
     {0,0,5,5,5,5,0,0,5,5,5,5,0,0}
 };
 
+// Sprites dos Inimigos de acordo com a dificuldade
 uint16_t enemy1_d1[][11] = {
     {0,0,0,0x0820,0x0820,0x0820,0x0820,0x0820,0,0,0}, 
     {0,0,0x0820,0x0820,0x0820,0x0820,0x0820,0x0820,0x0820,0,0}, 
@@ -406,6 +470,10 @@ uint16_t enemy2_d4[][11] = {
     {0,0,0xFDB7,0xFDB7,0xFDB7,0,0xFDB7,0xFDB7,0xFDB7,0,0}, 
     {0,0,0,0x0820,0x0820,0,0x0820,0x0820,0x0820,0,0},};
 
+
+// Sprites de UI (Pause e VS) - 16 bits direto
+
+//pause
 #define PAUSE_W 34
 #define PAUSE_H 8
 uint16_t pause_sprite[PAUSE_H][PAUSE_W] = {
@@ -419,6 +487,7 @@ uint16_t pause_sprite[PAUSE_H][PAUSE_W] = {
     {0x0000,0x0000,0x0000,0x0000,0x0000, 0x0000,0x0000,0x0000,0x0000,0x0000, 0x0000,0x0000,0x0000,0x0000,0x0000, 0x0000,0x0000,0x0000,0x0000,0x0000, 0x0000,0x0000,0x0000,0x0000,0x0000, 0x0000,0x0000,0x0000,0x0000} 
 };
 
+//vs
 #define VS_W 20
 #define VS_H 14
 uint16_t vs_sprite[VS_H][VS_W] = {
@@ -437,6 +506,8 @@ uint16_t vs_sprite[VS_H][VS_W] = {
     {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},
     {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000}
 };
+
+// Sprites dos emblemas(balls) dos Times (Símbolos de Dificuldade) - 64x64 pixels
 
 //corinthians
 #define BALL_W 64
@@ -706,66 +777,90 @@ uint16_t ball_d4[BALL_H][BALL_W] = {
     {0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF,0x00FF}
 };
 
-//Parametros de difuldade
+// =============================================================
+//                ESTRUTURAS DE DADOS DO JOGO
+// =============================================================
+
+// Estrutura que define os parâmetros de cada nível de dificuldade
 typedef struct {
-    int score_inc;
-    float init_speed;
-    float max_speed;
-    float accel_step;
-    int min_sq;
-    int max_sq;
-    int min_gap;
-    int max_gap;
-    uint16_t (*sprite1)[11];
-    uint16_t (*sprite2)[11];
-    uint16_t (*ball_sprite)[BALL_W];
+    int score_inc;      // Pontos ganhos por linha de inimigos desviada
+    float init_speed;   // Velocidade inicial de descida dos inimigos
+    float max_speed;    // Velocidade máxima permitida
+    float accel_step;   // Incremento de velocidade a cada frame/inimigo
+    int min_sq;         // Mínimo de inimigos spawneados por onda
+    int max_sq;         // Máximo de inimigos spawneados por onda
+    int min_gap;        // Distância mínima (em Y) entre ondas
+    int max_gap;        // Distância máxima (em Y) entre ondas
+    uint16_t (*sprite1)[11]; // Ponteiro para sprite do inimigo tipo 1
+    uint16_t (*sprite2)[11]; // Ponteiro para sprite do inimigo tipo 2
+    uint16_t (*ball_sprite)[BALL_W]; // Ponteiro para o sprite do time
 } DifficultyParams;
 
-DifficultyParams levels[4];
+DifficultyParams levels[4]; // Array com as configurações dos 4 níveis
 
-//Parametros dos inimigos
+// Estrutura para representar um inimigo na tela
 typedef struct {
-    float y;
-    int x;
-    int type;
-    int active;
+    float y;    // Posição vertical (float para movimento suave)
+    int x;      // Posição horizontal (inteiro, alinhado ao pixel)
+    int type;   // Tipo do inimigo (para decidir qual sprite desenhar)
+    int active; // Flag: 1 = ativo na tela, 0 = inativo/livre
 } Enemy;
-#define MAX_ACTIVE 50
-Enemy enemies[MAX_ACTIVE];
-int ecount = 0;
 
-//Random
+#define MAX_ACTIVE 50 // Máximo de inimigos simultâneos na tela
+Enemy enemies[MAX_ACTIVE]; // Pool de inimigos
+int ecount = 0; // Contador de inimigos ativos
+
+// Variáveis e funções para o Gerador de Números Aleatórios (RNG) simples
 static unsigned int rng_state = 1;
 unsigned int rand32() { 
+    // Algoritmo Linear Congruential Generator (LCG) simples e rápido
     rng_state = rng_state * 1103515245 + 12345; 
     return (rng_state >> 16) & 0x7FFF; 
 }
 int rand_range(int a, int b) { 
+    // Retorna um número aleatório entre [a, b]
     return a + (rand32() % (b - a + 1)); 
 }
 
-//funcoes
+// =============================================================
+//                     FUNÇÕES AUXILIARES
+// =============================================================
 
+/*
+ * Função: plot_pixel
+ * Descrição: Escreve uma cor de 16 bits em uma coordenada (x, y) específica no buffer VGA.
+ * Verifica limites da tela para evitar acesso inválido à memória (segfault).
+ */
 void plot_pixel(int x, int y, uint16_t color) {
     if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) return;
     int index = y * PIXELS_PER_ROW + x;
     vga_ptr[index] = color;
 }
 
-//gramado do nivel
+/*
+ * Função: draw_background_pattern
+ * Descrição: Preenche a tela inteira com um padrão de listras horizontais verdes (gramado).
+ * Também desenha as linhas laterais brancas do campo.
+ */
 void draw_background_pattern() {
     int stripe_height = 30;
     for (int y = 0; y < HEIGHT; y++) {
         int stripe_index = y / stripe_height;
-        uint16_t c = (stripe_index % 2 == 0) ? GREEN_D : GREEN_L;
+        // Alterna entre verde escuro e claro
+        uint16_t c = (stripe_index % 2 == 0) ? GREEN_D : GREEN_L2;
         for (int x = 0; x < WIDTH; x++) {
             plot_pixel(x, y, c);
+            // Desenha linhas brancas nas bordas
             if (x < 2 || x >= WIDTH-2 || y < 2 || y >= HEIGHT-2) plot_pixel(x, y, WHITE);
         }
     }
 }
 
-//apaga emblema
+/*
+ * Função: restore_menu_background
+ * Descrição: Redesenha o padrão de gramado apenas em uma área retangular específica.
+ * Usada para "apagar" sprites (como a bola de seleção) restaurando o fundo original.
+ */
 void restore_menu_background(int x, int y, int w, int h) {
     int stripe_height = 30;
     
@@ -773,7 +868,7 @@ void restore_menu_background(int x, int y, int w, int h) {
         if (r < 0 || r >= HEIGHT) continue;
         
         int stripe_index = r / stripe_height;
-        uint16_t c = (stripe_index % 2 == 0) ? GREEN_D : GREEN_L;
+        uint16_t c = (stripe_index % 2 == 0) ? GREEN_D : GREEN_L2;
         
         for (int c_idx = x; c_idx < x + w; c_idx++) {
             if (c_idx < 0 || c_idx >= WIDTH) continue;
@@ -782,11 +877,16 @@ void restore_menu_background(int x, int y, int w, int h) {
     }
 }
 
-//faz o bitmap das plavras brancas
+/*
+ * Função: draw_bitmap
+ * Descrição: Desenha um bitmap monocromático (array de 0s e 1s) com escala (zoom).
+ * Usado para textos grandes como "START" e "SOCCER".
+ */
 void draw_bitmap(int x0, int y0, int w, int h, const uint8_t *bitmap, uint16_t color, int scale) {
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
-            if (bitmap[y * w + x] == 1) {
+            if (bitmap[y * w + x] == 1) { // Se o pixel do bitmap estiver ativo
+                // Desenha um bloco de pixels correspondente à escala
                 for (int dy = 0; dy < scale; dy++)
                     for (int dx = 0; dx < scale; dx++)
                         plot_pixel(x0 + (x * scale) + dx, y0 + (y * scale) + dy, color);
@@ -795,12 +895,13 @@ void draw_bitmap(int x0, int y0, int w, int h, const uint8_t *bitmap, uint16_t c
     }
 }
 
-//enfeites do menu
+// Desenha a bola pequena decorativa do menu com escala
 void draw_ball_small(int x0, int y0, int scale) {
     for (int y = 0; y < 12; y++) {
         for (int x = 0; x < 12; x++) {
             uint8_t p = sprite_ball[y][x];
-            if (p == 0) continue;
+            if (p == 0) continue; // Pula transparência
+            // Mapeia índices de cor para cores reais de 16 bits
             uint16_t c = (p == 1) ? BLACK : (p == 2 ? WHITE : GREY);
             for (int dy = 0; dy < scale; dy++)
                 for (int dx = 0; dx < scale; dx++)
@@ -809,13 +910,14 @@ void draw_ball_small(int x0, int y0, int scale) {
     }
 }
 
-//jogadores do menu
+// Desenha os jogadores decorativos do menu com escala e cor de camisa personalizável
 void draw_player_menu(int x0, int y0, int scale, uint16_t shirt) {
     for (int y = 0; y < 21; y++) {
         for (int x = 0; x < 14; x++) {
             uint8_t p = sprite_player[y][x];
             if (p == 0) continue;
             uint16_t c;
+            // Paleta indexada do sprite do jogador
             switch(p) {
                 case 1: c = BLACK; break; 
                 case 2: c = SKIN; break;
@@ -831,42 +933,65 @@ void draw_player_menu(int x0, int y0, int scale, uint16_t shirt) {
     }
 }
 
-//converte a pontuacao pro display de 7 seg
+/*
+ * Função: update_score_display
+ * Descrição: Converte a pontuação numérica para o formato de 7 segmentos e
+ * escreve nos registradores mapeados em memória que controlam os displays HEX da placa.
+ */
 void update_score_display(int score) {
-    if (score > 999999) score = 999999;
+    if (score > 999999) score = 999999; // Trava no valor máximo
+    
+    // Extrai cada dígito decimal
     int d0 = score % 10;
     int d1 = (score / 10) % 10;
     int d2 = (score / 100) % 10;
     int d3 = (score / 1000) % 10;
     int d4 = (score / 10000) % 10;
     int d5 = (score / 100000) % 10;
+
+    // Monta a palavra de 32 bits para os registradores (cada byte controla um display)
     uint32_t hex3_0_val = (seg7_table[d3] << 24) | (seg7_table[d2] << 16) | (seg7_table[d1] << 8) | (seg7_table[d0]);
     uint32_t hex5_4_val = (seg7_table[d5] << 8) | (seg7_table[d4]);
+
+    // Escreve no hardware
     *hex3_hex0_ptr = hex3_0_val;
     *hex5_hex4_ptr = hex5_4_val;
 }
 
+/*
+ * Função: read_accel
+ * Descrição: Lê os dados brutos dos eixos X e Y do acelerômetro ADXL345 via barramento I2C.
+ * Aplica uma "zona morta" para evitar drift quando a placa está parada.
+ */
 void read_accel(float *ax, float *ay) {
-    uint8_t reg = 0x32;
-    if(write(fd_i2c, &reg, 1) != 1) return;
+    uint8_t reg = 0x32; // Registrador de dados do eixo X (DATAX0)
+    if(write(fd_i2c, &reg, 1) != 1) return; // Define o ponteiro de registro
+    
     uint8_t d[6];
+    // Lê 6 bytes sequenciais: X0, X1, Y0, Y1, Z0, Z1
     if (read(fd_i2c, d, 6) != 6) return; 
+    
+    // Reconstrói os valores de 16 bits (Little Endian)
     int16_t x = (d[1] << 8) | d[0];
     int16_t y = (d[3] << 8) | d[2];
+    
+    // Normaliza (256 LSB/g é uma aproximação comum para +/- 2g range)
     *ax = x / 256.0f;
     *ay = y / 256.0f;
+    
+    // Deadzone (Zona morta)
     if (*ax > -0.15f && *ax < 0.15f) *ax = 0;
     if (*ay > -0.15f && *ay < 0.15f) *ay = 0;
 }
 
-//ajuda a limpar a tela
+// Preenche uma linha inteira rapidamente (Otimização para limpeza de tela)
 void draw_row_fast(int y, uint16_t color) {
     if (y < 0 || y >= SCREEN_H) return;
     uint32_t base = y * VGA_STRIDE_PIXELS;
     for (int x = 0; x < SCREEN_W; x++) vga_ptr[base + x] = color;
 }
 
-//cria quadrados
+// Desenha um quadrado sólido (usado para efeitos ou formas simples)
 void draw_square_solid(int y, int x, int size, uint16_t color) {
     for (int i = 0; i < size; i++) {
         int yy = y + i;
@@ -879,47 +1004,67 @@ void draw_square_solid(int y, int x, int size, uint16_t color) {
     }
 }
 
-//faz o x de perca do nivel
+// Desenha o X vermelho gigante na tela de Game Over
 void draw_game_over_x() {
     int cx = SCREEN_W / 2;
     int cy = SCREEN_H / 2;
-    int size = 60;
-    int thickness = 6;
+    int size = 60;   // Tamanho das pernas do X
+    int thickness = 6; // Espessura
+
+    // Desenha diagonal principal
     for(int i = -size; i <= size; i++) {
         draw_square_solid(cy + i, cx + i, thickness, RED);
     }
+    // Desenha diagonal secundária
     for(int i = -size; i <= size; i++) {
         draw_square_solid(cy + i, cx - i, thickness, RED);
     }
 }
 
-//emblemas dos times
+/*
+ * Função: draw_sprite_with_transparent
+ * Descrição: Desenha os sprites grandes (bolas dos times) com suporte a transparência.
+ */
 void draw_sprite_with_transparent(int y_center, int x_center, int h, int w, uint16_t *sprite_data) {
     int start_y = y_center - (h / 2);
-    int start_x = (x_center + 48) - (w / 2);
+    int start_x = (x_center + 48) - (w / 2); // Deslocamento +48 no X
+
     for(int r = 0; r < h; r++) {
         int yy = start_y + r;
         if(yy < 0 || yy >= SCREEN_H) continue;
+        
         uint32_t base = yy * VGA_STRIDE_PIXELS;
+        
         for(int c = 0; c < w; c++) {
             int xx = start_x + c;
             if(xx < 0 || xx >= SCREEN_W) continue;
+            
+            // Acessa o array linearmente
             uint16_t color = sprite_data[r * w + c];
+            
+            // Ignora transparente (0) e o fundo azul padrão do sprite (0x00FF)
             if (color == 0 || color == 0x00FF) continue;
+
+            // CORREÇÃO DE COR: Força tons de azul muito escuro para preto
+            // Necessário pois alguns sprites convertidos tem artefatos de cor
             if (color <= 0x0060) {
                 color = BLACK;
             }
+
             vga_ptr[base + xx] = color;
         }
     }
 }
 
-//corrigindo o fato que as sprites de pause e vs tiveram de ser convertidas por um site diferente e pior por que os outros dois tinham acabado o teste gratis
+// Desenha sprites de UI (Pause, VS) com escala e transparência
 void draw_ui_sprite_scaled(int x, int y, int w, int h, uint16_t *sprite_data, int scale) {
     for (int r = 0; r < h; r++) {
         for (int c = 0; c < w; c++) {
             uint16_t color = sprite_data[r * w + c];
-            if (color == 0) continue;
+            
+            if (color == 0) continue; // Transparência
+            
+            // Desenha pixel escalado (bloco de scale x scale)
             for (int dy = 0; dy < scale; dy++) {
                 for (int dx = 0; dx < scale; dx++) {
                     plot_pixel(x + c * scale + dx, y + r * scale + dy, color);
@@ -929,7 +1074,7 @@ void draw_ui_sprite_scaled(int x, int y, int w, int h, uint16_t *sprite_data, in
     }
 }
 
-//desena inimigos
+// Desenha os sprites dos inimigos
 void draw_enemy_sprite(int y, int x, uint16_t (*sprite)[11]) {
     for (int r = 0; r < SQ_H; r++) {
         int yy = y + r;
@@ -945,7 +1090,7 @@ void draw_enemy_sprite(int y, int x, uint16_t (*sprite)[11]) {
     }
 }
 
-//desenha jogador
+// Desenha o sprite do jogador no jogo principal
 void draw_player_sprite(int y, int x) {
     for (int r = 0; r < PLAYER_H; r++) {
         int yy = y + r;
@@ -961,40 +1106,50 @@ void draw_player_sprite(int y, int x) {
     }
 }
 
-//evita colocar uma sprite em cima da outra
+// Verifica se um novo inimigo pode spawnar naquela posição sem sobrepor outro existente
 int conflict(int y, int x) {
     for(int i=0; i<ecount; i++){
         if(!enemies[i].active) continue;
         int oy = (int)enemies[i].y; 
         int ox = enemies[i].x;
+        // Verifica interseção de retângulos (com margem de segurança)
         if ((y < oy + SQ_H + 20) && (y + SQ_H + 20 > oy) &&
             (x < ox + SQ_W + 20) && (x + SQ_W + 20 > ox))
-            return 1;
+            return 1; // Conflito detectado
     }
-    return 0;
+    return 0; // Sem conflito
 }
 
-//limpa inimigos out of bounds conta pontuacao e aumenta velocidade
+/*
+ * Função: cleanup
+ * Descrição: Remove inimigos que saíram da tela (parte inferior),
+ * incrementa a pontuação e aumenta a velocidade do jogo progressivamente.
+ */
 void cleanup(int *current_score, float *current_speed, DifficultyParams *diff) {
     int j=0;
     for(int i=0; i<ecount; i++){
         if(enemies[i].active) {
             if(enemies[i].y > SCREEN_H) {
+                // Inimigo saiu da tela
                 enemies[i].active = 0; 
                 (*current_score) += diff->score_inc; 
                 update_score_display(*current_score);
+                
+                // Aumenta a velocidade
                 *current_speed += diff->accel_step;
                 if (*current_speed > diff->max_speed) *current_speed = diff->max_speed;
             } else {
+                // Mantém o inimigo na lista ativa e compacta o array
                 enemies[j++] = enemies[i]; 
             }
         }
     }
-    ecount = j;
+    ecount = j; // Atualiza contagem real de inimigos
 }
 
+// Verifica colisão AABB (caixa) entre o jogador e qualquer inimigo ativo
 int check_player_collision(int py, int px) {
-    int hitbox_margin = 2;
+    int hitbox_margin = 2; // Reduz a hitbox ligeiramente para ser mais justo
     int pw = PLAYER_W - hitbox_margin;
     int ph = PLAYER_H - hitbox_margin;
     int ew = SQ_W - hitbox_margin;
@@ -1004,52 +1159,67 @@ int check_player_collision(int py, int px) {
         if (!enemies[i].active) continue;
         int ex = enemies[i].x;
         int ey = (int)enemies[i].y;
+        
+        // Teste de sobreposição de retângulos
         if (px < ex + ew && px + pw > ex && py < ey + eh && py + ph > ey) {
-            return 1;
+            return 1; // Colisão!
         }
     }
     return 0;
 }
 
-//main
+// =============================================================
+//                       FUNÇÃO PRINCIPAL
+// =============================================================
 int main() {
     int fd;
-    rng_state = time(NULL);
+    rng_state = time(NULL); // Inicializa a seed
 
-    //dificuldades
-    //Corintians
+    // --- Configuração dos Níveis de Dificuldade ---
+    // Nível 0: Corinthians (Mais fácil)
     levels[0] = (DifficultyParams){1, 2.0f, 80.0f, 0.0004f, 2, 3, 40, 80, enemy1_d1, enemy2_d1, ball_d1};
-    //Palmeiras
+    // Nível 1: Palmeiras
     levels[1] = (DifficultyParams){2, 2.0f, 80.0f, 0.0006f, 2, 5, 30, 70, enemy1_d2, enemy2_d2, ball_d2};
-    //Flamengo
+    // Nível 2: Flamengo
     levels[2] = (DifficultyParams){6, 3.0f, 80.0f, 0.0008f, 3, 6, 20, 60, enemy1_d3, enemy2_d3, ball_d3};
-    //Inter
+    // Nível 3: Inter (Mais difícil)
     levels[3] = (DifficultyParams){16, 4.0f, 80.0f, 0.0016f, 4, 8, 10, 50, enemy1_d4, enemy2_d4, ball_d4};
 
-    //setup da placa
+    // --- Inicialização do Hardware ---
+    
+    // Abre acesso à memória física (/dev/mem) - Requer privilégios de root (sudo)
     if ((fd = open("/dev/mem", O_RDWR | O_SYNC)) == -1) return 1;
+
+    // Mapeia memória de vídeo (VGA)
     void *vga_base_addr = mmap(NULL, VGA_SPAN, (PROT_READ | PROT_WRITE), MAP_SHARED, fd, VGA_BASE_PHYS);
     if (vga_base_addr == MAP_FAILED) { close(fd); return 1; }
     vga_ptr = (volatile uint16_t *)vga_base_addr;
+
+    // Mapeia registradores de periféricos (Botões, LEDs)
     void *hps_virtual_base = mmap(NULL, HW_REGS_SPAN, (PROT_READ | PROT_WRITE), MAP_SHARED, fd, HW_REGS_BASE);
     if (hps_virtual_base == MAP_FAILED) { munmap((void*)vga_base_addr, VGA_SPAN); close(fd); return 1; }
+    
+    // Calcula endereços virtuais dos ponteiros
     keys_ptr = (volatile uint32_t *)((char *)hps_virtual_base + KEYS_OFFSET);
     hex3_hex0_ptr = (volatile uint32_t *)((char *)hps_virtual_base + HEX3_HEX0_OFFSET);
     hex5_hex4_ptr = (volatile uint32_t *)((char *)hps_virtual_base + HEX5_HEX4_OFFSET);
+
+    // Configura Acelerômetro via I2C
     fd_i2c = open("/dev/i2c-0", O_RDWR);
     if (fd_i2c < 0) return 1;
-    ioctl(fd_i2c, I2C_SLAVE, 0x53);
+    ioctl(fd_i2c, I2C_SLAVE, 0x53); // Endereço do ADXL345
+    // Comandos de inicialização do acelerômetro
     uint8_t init_cmds[][2] = {{0x2D, 0x08}, {0x31, 0x08}, {0x2C, 0x0A}};
     for(int i=0; i<3; i++) write(fd_i2c, init_cmds[i], 2);
 
     int current_level = 0; 
 
-    //jogo
+    // ================= LOOP DE SESSÃO TOTAL (Menu -> Jogo -> Menu) =================
     while(1) {
         update_score_display(0);
         
-        //exibe o menu
-        draw_background_pattern();
+        // --- RENDERIZAÇÃO DO MENU ESTÁTICO ---
+        draw_background_pattern(); // Gramado
         
         int shadow = 3;
         int x_de1 = (WIDTH - (34 * 4)) / 2;
@@ -1058,25 +1228,38 @@ int main() {
         int y_soc = y_de1 + (12 * 4) + 10;
         int x_start = (WIDTH - (31 * 2)) / 2;
         int y_start = 180;
+        
+        // Desenha Logos com sombra
         draw_bitmap(x_de1 + shadow, y_de1 + shadow, 34, 12, (const uint8_t *)bmp_de1, BLACK, 4);
         draw_bitmap(x_de1, y_de1, 34, 12, (const uint8_t *)bmp_de1, WHITE, 4);
         draw_bitmap(x_soc + 2, y_soc + 2, 47, 10, (const uint8_t *)bmp_soccer, BLACK, 3);
         draw_bitmap(x_soc, y_soc, 47, 10, (const uint8_t *)bmp_soccer, YELLOW, 3);
+        
+        // Decoração
         draw_ball_small(x_soc - (12 * 3) - 10, y_soc - 2, 3);
         draw_ball_small(x_soc + (47 * 3) + 10, y_soc - 2, 3);
         draw_player_menu(40, HEIGHT - 30 - (21*3), 3, BLUE);
         draw_player_menu(WIDTH - 40 - (14*3), HEIGHT - 30 - (21*3), 3, RED);
+
+        // Texto START (sombra fixa)
         draw_bitmap(x_start + 2, y_start + 2, 31, 8, (const uint8_t *)bmp_start, BLACK, 2);
+
+        // Bola da dificuldade inicial
         draw_sprite_with_transparent(y_start - 40, SCREEN_W/2, BALL_H, BALL_W, (uint16_t*)levels[current_level].ball_sprite);
+    
+        // Ícone VS no centro
         int vs_scale = 2; 
         int vs_x = (SCREEN_W / 2) - 30; 
         int vs_y = (y_start - 40) - (VS_H * vs_scale / 2); 
+        
         draw_ui_sprite_scaled(vs_x, vs_y, VS_W, VS_H, (uint16_t*)vs_sprite, vs_scale);
+
+        // --- LOOP DE INTERAÇÃO DO MENU ---
         int frame_counter = 0;
         bool start_visible = true;
-        
-        //pisca o start
+
         while (1) {
+            // Animação: Piscar texto START
             if (frame_counter % 2000 == 0) { 
                 if (start_visible) {
                     draw_bitmap(x_start, y_start, 31, 8, (const uint8_t *)bmp_start, WHITE, 2);
@@ -1087,31 +1270,43 @@ int main() {
             }
             frame_counter++;
 
-            //espera o player fazer alguma coisa
+            // Leitura dos botões
             uint32_t k = *keys_ptr;
 
             if (k != 0) {
-                //Inicia o jogo
+                // START (KEY3) - Inicia o jogo
                 if (k & BTN_LEFT_MASK) {
                     break; 
                 }
-                //escolhe a dificuldade
+                // MUDAR DIFICULDADE (KEY0)
                 else {
+                    // Limpa a bola antiga
                     int clear_x = (SCREEN_W / 2) + 48 - (BALL_W / 2);
                     int clear_y = (y_start - 40) - (BALL_H / 2);
                     restore_menu_background(clear_x, clear_y, BALL_W, BALL_H);
+
+                    // Cicla a dificuldade
                     current_level++;
                     if (current_level > 3) current_level = 0;
+                    
+                    // Desenha a nova bola
                     draw_sprite_with_transparent(y_start - 40, SCREEN_W/2, BALL_H, BALL_W, (uint16_t*)levels[current_level].ball_sprite);
+                    
                     fflush(stdout);
+
+                    // Debounce (espera soltar o botão)
                     while ((*keys_ptr != 0) && !(*keys_ptr & BTN_LEFT_MASK)) usleep(10000);
                 }
             }
         }
+
+        // Garante que o botão start foi solto antes de começar
         while (*keys_ptr & BTN_LEFT_MASK) usleep(10000);
+
+        // Limpa a tela (fundo azul) para o jogo
         for(int y = 0; y < SCREEN_H; y++) draw_row_fast(y, BLUE);
 
-        //configura a dificuldade
+        // Inicializa variáveis da partida
         DifficultyParams diff = levels[current_level];
         rng_state += time(NULL); 
         float p_x = (SCREEN_W - PLAYER_W) / 2.0f;
@@ -1122,27 +1317,37 @@ int main() {
         float next_spawn = (float)rand_range(diff.min_gap, diff.max_gap);
         int game_running = 1;
         int score = 0;
+        
         ecount = 0;
         for(int i=0; i<MAX_ACTIVE; i++) enemies[i].active = 0;
+
         fflush(stdout);
         
-        //nivel
+        // ================= LOOP DA PARTIDA (GAMEPLAY) =================
         while(game_running){
-            //pause
+            // --- LÓGICA DE PAUSE ---
             if (*keys_ptr & BTN_RIGHT_MASK) {
+                // Desenha Sprite de Pause Centralizado
                 int p_scale = 4;
                 int p_w = PAUSE_W * p_scale;
                 int p_h = PAUSE_H * p_scale;
                 int px = ((SCREEN_W - p_w) / 2)+30; 
                 int py = (SCREEN_H - p_h) / 2;
+                
                 draw_ui_sprite_scaled(px, py, PAUSE_W, PAUSE_H, (uint16_t*)pause_sprite, p_scale);
+                
+                // Espera soltar o botão de pause
                 while (*keys_ptr & BTN_RIGHT_MASK) usleep(10000);
+                
+                // Loop de espera no Pause
                 while (1) {
                     uint32_t k = *keys_ptr;
+                    // Resume o jogo (KEY0)
                     if (k & BTN_RIGHT_MASK) {
                         while (*keys_ptr & BTN_RIGHT_MASK) usleep(10000);
                         break; 
                     }
+                    // Sai para o menu (KEY3)
                     if (k & BTN_LEFT_MASK) {
                         while (*keys_ptr & BTN_LEFT_MASK) usleep(10000);
                         game_running = 0; 
@@ -1151,35 +1356,43 @@ int main() {
                     usleep(10000); 
                 }
             }
-            if (!game_running) break;
+            if (!game_running) break; // Sai se escolheu voltar ao menu
 
-            //movimentacao
+            // --- LÓGICA DE MOVIMENTO E FÍSICA ---
             float ax, ay;
             read_accel(&ax, &ay);
             p_x += (ax * p_speed);
             p_y -= (ay * p_speed); 
+            
+            // Colisão com as bordas da tela
             if (p_x < 0) p_x = 0;
             if (p_x > SCREEN_W - PLAYER_W) p_x = SCREEN_W - PLAYER_W;
             if (p_y < 0) p_y = 0;
             if (p_y > SCREEN_H - PLAYER_H) p_y = SCREEN_H - PLAYER_H;
+
+            // Scroll vertical e movimento dos inimigos
             world_scroll_y += current_speed;
             for(int i=0; i<ecount; i++) {
                 if(enemies[i].active) enemies[i].y += current_speed;
             }
+            
+            // Remove inimigos que saíram e atualiza pontuação/velocidade
             cleanup(&score, &current_speed, &diff);
 
-            //colisao
+            // --- VERIFICAÇÃO DE COLISÃO (GAME OVER) ---
             if (check_player_collision((int)p_y, (int)p_x)) {
-                draw_game_over_x();
+                draw_game_over_x(); // Desenha X vermelho
+                
+                // Espera qualquer botão para sair
                 while (*keys_ptr != 0) usleep(10000);
                 while (!(*keys_ptr & BTN_LEFT_MASK)) {
                     usleep(10000);
                 }
                 while (*keys_ptr & BTN_LEFT_MASK) usleep(10000);
-                break;
+                break; // Fim de jogo, volta ao menu
             }
 
-            //geracao de inimigos
+            // --- SPAWN DE INIMIGOS ---
             next_spawn -= current_speed;
             if(next_spawn <= 0){
                 int qty = rand_range(diff.min_sq, diff.max_sq);
@@ -1200,7 +1413,9 @@ int main() {
                 next_spawn = (float)rand_range(diff.min_gap, diff.max_gap);
             }
 
-            //renderizacao
+            // --- RENDERIZAÇÃO DO JOGO ---
+            
+            // Fundo (Listras animadas)
             for(int y = 0; y < SCREEN_H; y++) {
                 int virtual_y = y - (int)world_scroll_y;
                 int stripe_idx = (virtual_y / STRIPE_H) % 2;
@@ -1208,6 +1423,8 @@ int main() {
                 uint16_t color = (stripe_idx == 0) ? GREEN_D : GREEN_L;
                 draw_row_fast(y, color);
             }
+
+            // Inimigos
             for(int i=0; i<ecount; i++){
                 if(!enemies[i].active) continue;
                 uint16_t (*spr)[11] = (enemies[i].type == 1) ? diff.sprite1 : diff.sprite2;
@@ -1226,6 +1443,8 @@ int main() {
                     }
                 }
             }
+
+            // Jogador
             for (int r = 0; r < PLAYER_H; r++) {
                 int yy = (int)p_y + r;
                 if (yy < 0) continue;
@@ -1239,10 +1458,11 @@ int main() {
                 }
             }
 
-            usleep(20000);
+            usleep(20000); // Frame limiter (~50 FPS)
         }
     }
-    //cleanup
+
+    // Limpeza final de recursos
     close(fd_i2c);
     munmap((void*)keys_ptr, HW_REGS_SPAN);
     munmap((void*)vga_base_addr, VGA_SPAN);
